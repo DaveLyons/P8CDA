@@ -1,0 +1,2079 @@
+*********************************************************
+*
+* P8CDA -- load CDAs & setup files under ProDOS 8
+*
+* by David A. Lyons
+*
+* Started 12-Dec-87
+*
+* First released version 20-Dec-87
+*
+* 22-Dec-87	DL ==> v1.1
+*
+* Patches ProDOS 1.4 (in RAM) to force MLIACTV to be
+* cleared correctly when a ProDOS call finishes.
+* $DE8F (in the C08B bank) is changed from a $0E to
+* a $4E if $DE90 contains $BF9B (MLIACTV).  This
+* changes an ASL instruction to a LSR.
+*
+* Also gives a fatal error message for P16 calls.
+*
+* 7-Mar-88	DL ==> v1.2
+*
+* DS 17 changed to DS 20 (more than needed) to allow
+* for 16-character volume names.  (The first byte
+* of PfxParms was getting trashed, causing the prefix
+* not to be set correctly when the next SYS file was
+* run--> file not found error.)
+*
+* Also, a CDA is now loaded only if the highest bit
+* of its AuxType is clear.
+*
+* CLI added (enable interrupts).
+*
+* GEnie mail address (D.LYONS2) added to title screen.
+*
+* 7-Jun-88 DL ==> v1.3
+*
+* Changed to tolerate some extra bytes after the last segment
+* (ReadHeader changed to treat a too-short header as
+* the end of file.)  This allows RWP to append serial
+* number bytes to the end of the file.  Apparently
+* the ProDOS 16 Loader v1.4 tolerates these extra bytes.
+*
+* Removed the Option-key feature allowing part of the
+* super-hires screen to be used for CDAs.
+*
+* 4-Jul-88 DL ==> v1.4
+*
+* If the prefix is set to the volume directory, now
+* initializes the system (JSL $FE0000) and scans for
+* & executes PIF (Permanant Init Files) and TIF (Temp
+* Init Files) files in */SYSTEM/SYSTEM.SETUP.  The
+* RAM allocated for TIF files is deallocated when the
+* file finishes executing.
+*
+* 31-Jul-88 DL ==> v2.0
+*
+* Final cleanup before sending to RWP.
+* LCONST records are no longer limited in size.
+* Errors are not fatal when run from a cmd shell.
+* Pathname of CDA/TIF/PIF is at $280 when it is
+* executed.
+*
+* 3-Dec-88 DL ==> v2.1
+*
+* Looks in */SYSTEM/P8.SETUP rather than SYSTEM.SETUP,
+* because most TIF/PIF files won't work without a 16-
+* bit operating system.
+* If SYSTEM/P8.ACCS exists, loads CDAs from there rather
+* than from SYSTEM/DESK.ACCS.
+* Unresolved problem:  sound vector re-init
+*
+*********************************************************
+*
+* 25-Mar-92 DAL ==> v2.1
+*
+* Converted to MPW IIgs.
+*
+*********************************************************
+*
+* 25-Mar-92 DAL ==> v3.0
+*
+* Changed version stuff to 3.0.
+*
+* Need to tolerate ExpressLoad segments & dig up old
+* bugs to fix.
+*
+*********************************************************
+*
+* Loads CDAs while ProDOS 8 is active.  (ProDOS 16 may
+* or may not have been booted originally; it doesn't
+* matter.)
+*
+* Behavior:
+*
+* If there is a pathname in the Catalyst buffer, the
+* corresponding CDA is loaded, and P8CDA QUITs back
+* to the caller.
+*
+* Otherwise, if the Prefix is set to the top-level directory,
+* all CDAs in SYSTEM/DESK.ACCS are loaded.  If it's not a
+* top-level dir, all the CDAs in the prefix directory are
+* loaded.
+*
+* After all the CDAs in a directory are loaded, P8CDA
+* searches the prefix directory for a .SYSTEM file AFTER
+* P8CDA.SYSTEM and runs it; if none is found, it just
+* QUITs instead.
+*
+*********************************************************
+*********************************************************
+P8CDA	PROC
+	include 'all.macros'
+
+MyVersion	equ $30	;3.0
+BigBuff	equ $4000
+BigBuffSize	equ $B000-BigBuff
+FileBuff	equ $0800
+FileBuff2	equ $0C00
+SegBaseTbl	equ $1000
+SegBaseTbl2	equ $1200
+SegEndTbl	equ $1400
+
+deEntry	equ $1600  ;a directory entry gets read here
+deName	equ $1600  ;(need at least $2b bytes)
+deType	equ $1610
+deAuxType	equ $161f
+
+aDirPage	equ $1700
+thePrefix	equ $1f00
+
+tCDA	equ $B9	;Classic Desk Accessory
+tTIF	equ $B7	;Temporary init file
+tPIF	equ $B6	;permanent inif file
+
+;
+; ProDOS definitions
+;
+P16	equ $E100A8
+P16_2	equ $E100B0
+mli	equ $BF00
+mli_quit	equ $65
+mli_open	equ $C8
+mli_read	equ $CA
+mli_close	equ $CC
+mli_setmark	equ $CE
+mli_getmark	equ $CF
+mli_getinfo	equ $C4
+mli_getpfx	equ $C7
+mli_setpfx	equ $C6
+bitmap	equ $bf58
+bitmapsize	equ 24
+iBakVer	EQU $bffc ;earliest MLI version
+iVersion	EQU $bffd ;sys prog version
+kBakVer	EQU $bffe ;minimum version compatible
+;
+; Zero page
+;
+Handle	equ $00
+Ptr	equ $04
+NamePtr	equ $08
+PathP	equ $fe
+;
+; misc
+;
+cout	equ $fded
+crout	equ $fd8e
+prbyte	equ $fdda
+home	equ $fc58
+rdkey	equ $fd0c
+cr	equ $d
+
+*********************************************************
+	jmp Go2
+	dc.b $ee,$ee
+	dc.b 65
+LoadPath	dc.b 0
+	ds.b 64
+*********************************************************
+	dc.b cr,cr
+TheTitle	dc.b 'P8CDA by David A. Lyons',cr,cr
+	dc.b 'Copr. 1988,1992 Roger Wagner Publishing',cr,cr,cr,cr
+	dc.b '[v3.0] Press a key ',0
+**********************************************************
+Go2
+	longa off
+	longi off
+*
+	sta $c00c  ;40 columns, please
+	sta $c00e  ;no MouseText chars
+	sta $c000  ;no 80store
+	jsr $fe84  ;NORMAL
+	jsr $fb2f  ;init text screen
+	jsr $fe93  ;init output hooks
+	jsr $fe89  ;and input hooks
+
+	ldx #BitMapSize-1
+	lda #0
+init_bm	sta bitmap,x
+	dex
+	bpl init_bm
+	lda #%11001111
+	sta bitmap+0
+	lda #1
+	sta bitmap+BitMapSize-1
+	lda #1
+	sta ibakver
+	lda #myversion
+	sta iversion
+*
+* Patch ProDOS 1.4 MLIACTV bug
+*
+	lda $C08B
+	lda $C08B
+	lda $DE8F
+	cmp #$0e
+	bne P14good
+	lda $de90
+	cmp #$9b
+	bne P14good
+	lda $de91
+	cmp #$bf
+	bne P14good
+	lda #$4e ;lsr
+	sta $DE8F
+	stz $bf9b
+P14good	lda $C081
+
+	sec
+	jsr $fe1f
+	bcc IsGS
+	jsr home
+	ldx #0
+msg1	lda NeedGSm,x
+	beq msgx
+	ora #$80
+	jsr cout
+	inx
+	bne msg1
+msgx	jsr rdkey
+	jmp byebye
+NeedGSm	dc.b 'P8CDA REQUIRES APPLE IIGS '
+	dc.b 0
+
+IsGS	cli	;added 7-Mar-88 DL
+	lda $c061
+	sta AppleKey
+	sta AppleKey+1
+
+	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+
+	jsr ShowTitle
+
+	jsr AllocP8Mem
+	jsr CatchP16
+
+	lda LoadPath
+	and #$00ff
+	bne LoadJustOne
+*
+* Load all CDAs in directory (current or SYSTEM/DESK.ACCS)
+* and run next .SYSTEM file
+*
+	jsr LoadAllCDAs
+	brl RunNextSys
+
+*********************************************************
+*
+* Load the specified CDA and just Quit
+*
+*********************************************************
+LJ1err	brl FatalPerr
+*
+LoadJustOne	lda #LoadPath
+	sta InfoPath
+	jsr GetInfo
+	and #$00ff
+	bne LJ1err
+	lda InfoType
+	and #$00ff
+	cmp #tPIF
+	beq LJ1str
+	cmp #tTIF
+	beq LJ1str
+
+	lda #LoadPath
+	jsr LoadOneCDA
+	brl DoQuit
+
+LJ1str	lda #LoadPath
+	jsr LoadOneSTR
+	brl DoQuit
+
+*********************************************************
+*
+* LoadAllCDAs -- if the prefix is not a volume directory,
+*	load all CDAs from it.  If it is a volume directory,
+*	load all CDAs from SYSTEM/DESK.ACCS
+*
+*********************************************************
+LoadAllCDAs	jsr GetPrefix
+	jsr IsVolDir ;clc=vol dir
+	lda #thePrefix
+	bcs useDirA
+*
+* Prefix is volume directory, so Init the system thoroughly
+* and load init files from */SYSTEM/P8.SETUP before
+* loading CDAs from */SYSTEM/DESK.ACCS
+*
+	jsr InitSystem
+	jsr LoadSetups
+	jsr SetOrigPfx
+* --- load from SYSTEM/P8.ACCS instead of SYSTEM/DESK.ACCS if exists [2.1]
+	lda #Sys8DAPath
+	sta InfoPath
+	jsr GetInfo
+	and #$00ff
+	bne noSys8path
+	lda #Sys8DApath
+	bra useDirA
+
+noSys8path	lda #SysDApath
+useDirA	jsr BeginDirScan
+Scn4CDAs	jsr Read1Entry
+	bcs laCDAx
+	lda deName
+	and #$00ff
+	beq Scn4CDAs
+	lda deType
+	and #$00ff
+	cmp #tCDA
+	bne Scn4CDAs
+
+	lda deAuxType
+	bmi Scn4CDAs
+
+	lda #deName
+	jsr LoadOneCDA
+	bra Scn4CDAs
+laCDAx	jsr CloseDir
+	rts
+
+*********************************************************
+*
+* InitSystem calls $FE0000 to boot-init the toolsets
+* like P16 does.  (Most importantly, this cleans out
+* the CDA menu in case the user did a warm reboot--we
+* don't want duplicate CDAs lying around.)
+*
+*********************************************************
+InitSystem	lda $E100BD
+	and #$00ff
+	bne NoInit	;don't re-init anything if P16 is around
+	sep #$30
+	longa off
+	longi off
+	lda #1
+	trb $C068	;ensure INTERNAL $Cx ROM
+	lda #$6b	;store an RTL
+	sta $E100AC	;  at OS_Vector
+	php
+	sei
+	lda #$1e
+	sta $C035	;init shadow register
+	jsl $FE0000	;init system vectors & tools
+	stz $C041	;turn off lots of interrupts
+	stz $C047	;clear VBL/3.75Hz int flags
+
+	lda #9	;init serial chip
+	sta $C039
+	lda #$c0
+	sta $C039
+	lda #$0b
+	sta $C039
+	lda #$d2
+	sta $C039
+
+	lda #$fb
+	sta $010100	;init aux-mem stack pointer
+	plp
+	rep #$30
+	longa on
+	longi on
+NoInit	rts
+
+*********************************************************
+LoadSetups	lda #SysSETUPpath
+	sta InfoPath
+	jsr GetInfo
+	and #$00ff
+	bne NoSTRs
+	lda #SysSETUPpath
+	jsr BeginDirScan
+Scn4STRs	jsr Read1Entry
+	bcs laSTRx
+	lda deName
+	and #$00ff
+	beq Scn4STRs
+	lda deType
+	and #$00ff
+	cmp #tTIF
+	beq isSTR
+	cmp #tPIF
+	bne Scn4STRs
+
+isSTR	lda deAuxType
+	bmi Scn4STRs
+
+	lda #deName
+	jsr LoadOneSTR
+	bra Scn4STRs
+laSTRx	jsr CloseDir
+NoSTRs	rts
+
+*********************************************************
+GetPrefix	lda #thePrefix
+	sta PfxAdr
+	sec
+	xce
+	jsr mli
+	dc.b mli_getpfx
+	dc.w PfxParms
+	clc
+	xce
+	rep #$30
+	rts
+*********************************************************
+SetOrigPfx	lda #thePrefix
+	sta PfxAdr
+	sec
+	xce
+	jsr mli
+	dc.b mli_setpfx
+	dc.w PfxParms
+	clc
+	xce
+	rep #$30
+	rts
+*********************************************************
+IsVolDir	sep #$30
+	longa off
+	longi off
+	ldy #0	;# of slashes in prefix
+	ldx thePrefix
+	beq counted
+CountSl	dex
+	beq counted
+	lda thePrefix,x
+	and #$7f
+	cmp #$2f
+	bne CountSl
+	iny
+	bne CountSl
+counted	cpy #2
+	rep #$30
+	longa on
+	longi on
+	rts
+
+*********************************************************
+dOpenFail	brl FatalPerr
+
+BeginDirScan	stz DirEndFlag
+	sta doName
+	sta pfxAdr
+	sec
+	xce
+	longa off
+	longi off
+
+	jsr mli
+	dc.b mli_setpfx
+	dc.w PfxParms
+	jsr mli
+	dc.b mli_getpfx
+	dc.w PfxParms
+
+	jsr mli
+	dc.b mli_open
+	dc.w dOpenParms
+	bcs dOpenFail
+	lda doRef
+	sta dcRef
+	sta drRef
+	sta dmRef
+
+	lda #$2b
+	sta drLen
+	jsr mli
+	dc.b mli_read
+	dc.w dReadParms
+	bcs dOpenFail
+
+	lda deEntry+$23 ;entry length
+	sta EntryLen
+	sta drLen
+	lda deEntry+$24 ;ent per block
+	sta EntPerBlk
+	dec a
+	sta EntThisBlk
+
+	clc
+	lda #4
+	adc EntryLen
+	sta dmMark
+	stz dmMark+1
+	jsr mli
+	dc.b mli_setmark
+	dc.w dMarkParms
+
+	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	rts
+
+*********************************************************
+Read1Entry	sec
+	xce
+	longa off
+	longi off
+	bit DirEndFlag
+	bmi r1e_done2
+	jsr mli
+	dc.b mli_read
+	dc.w dReadParms
+	bcs r1e_done
+	lda deEntry
+	and #$0f
+	sta deEntry
+	jsr MaybeNxtBlk
+	ror DirEndFlag
+	clc
+	xce
+	rep #$30
+	clc
+	rts
+
+r1e_done	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	and #$00ff
+	cmp #$4c
+	beq r1e_d2
+	brl FatalPerr
+r1e_d2	sec
+	rts
+
+r1e_done2	clc
+	xce
+	rep #$30
+	sec
+	rts
+*********************************************************
+* called in emulation mode
+	longa off
+	longi off
+MaybeNxtBlk	dec EntThisBlk
+	clc
+	bne mnb_x
+	lda EntPerBlk
+	sta EntThisBlk
+	jsr mli
+	dc.b mli_getmark
+	dc.w dMarkParms
+	lda #4
+	sta dmMark
+	lda dmMark+1
+	and #$fe
+	inc a
+	inc a
+	sta dmMark+1
+	jsr mli
+	dc.b mli_setmark
+	dc.w dMarkParms
+mnb_x	rts
+	longa on
+	longi on
+
+*********************************************************
+CloseDir	sec
+	xce
+	jsr mli
+	dc.b mli_close
+	dc.w dCloseParms
+	clc
+	xce
+	rep #$30
+	rts
+
+*********************************************************
+*
+* RunNextSystem --
+*
+*********************************************************
+RunNextSys	lda #0
+	sta >P16
+	sta >P16_2
+	jsr SetOrigPfx
+	lda #thePrefix
+	jsr BeginDirScan
+rns1	jsr Read1Entry
+	bcs rns_fail
+	jsr CmpMyName
+	bcs rns1
+rns2	jsr Read1Entry
+	bcs rns_fail
+	jsr IsSYSTEMfile
+	bcs rns2
+	brl RunThisFile
+rns_fail	jsr CloseDir
+	brl DoQuit
+*
+* Launch the SYS file at deName
+*
+rsFail	brl FatalPerr
+
+RunThisFile	jsr CloseDir
+
+	sec
+	xce
+	longa off
+	longi off
+	jsr mli
+	dc.b mli_open
+	dc.w rsOpenParms
+	bcs rsFail
+	lda rsOref
+	sta rsRref
+
+	ldx #16
+copy280	lda deName,x
+	sta $280,x
+	dex
+	bpl copy280
+
+	ldx #0
+copy1000	lda image,x
+	sta $1000,x
+	dex
+	bne copy1000
+	jmp $1000
+
+rsOpenParms	dc.b 3
+	dc.w deName
+	dc.w FileBuff
+rsOref	dc.b 0
+
+image
+diff1	equ image-$1000
+	jsr mli
+	dc.b mli_read
+	dc.w rsRead-diff1
+	pha
+	jsr mli
+	dc.b mli_close
+	dc.w rsClose-diff1
+	pla
+	bne rsOuch
+	jsr home
+	ldx #$ff
+	txs
+	jmp $2000
+rsOuch	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	and #$00ff
+	pha
+	pea 0
+	pea 0
+	_SysFailMgr
+
+rsRead	dc.b 4
+rsRref	dc.b 0
+	dc.w $2000,$BF00-$2000,0
+
+rsClose	dc.b 1,0
+
+*********************************************************
+* return CLC if name at deName is P8CDA.SYSTEM
+*********************************************************
+CmpMyName	sep #$30
+	longa off
+	longi off
+	ldx #12
+cmn1	lda deEntry,x
+	cmp MyName,x
+	bne cmn_no
+	dex
+	bpl cmn1
+	rep #$30
+	clc
+	rts
+cmn_no	rep #$30
+	longa on
+	longi on
+	sec
+	rts
+MyName	dc.b 12,'P8CDA.SYSTEM'
+
+*********************************************************
+IsSYSTEMfile	sep #$30
+	longa off
+	longi off
+	lda deType
+	cmp #$ff
+	bne isf_no
+	ldy deName
+	cpy #8
+	bcc isf_no
+	ldx #6
+isf1	lda deName,y
+	cmp DotSys,x
+	bne isf_no
+	dey
+	dex
+	bpl isf1
+isf_yes	clc
+	rep #$30
+	rts
+isf_no	sec
+	rep #$30
+	longa on
+	longi on
+	rts
+
+DotSys	dc.b '.SYSTEM'
+
+*********************************************************
+*
+* DoQuit -- back to emulation mode, ProDOS 8 quit
+*
+*********************************************************
+DoQuit	lda #0
+	sta >P16
+	sta >P16_2
+	sec
+	xce
+	jsr home
+byebye	jsr mli
+	dc.b mli_quit
+	dc.w quit_parms
+	brk 1
+quit_parms	dc.b 4,0,0,0,0,0,0
+*********************************************************
+GetInfo	sec
+	xce
+	longa off
+	longi off
+	jsr mli
+	dc.b mli_getinfo
+	dc.w InfoParms
+	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	rts
+*********************************************************
+BadCDA	brl FatalPerr
+BadCDAtype	ldx #BadCDAmsg
+	brl die
+
+LoadOneCDA	sta InfoPath
+	jsr GetInfo
+	and #$00ff
+	bne BadCDA
+	lda InfoType
+	and #$00ff
+	cmp #tCDA
+	bne BadCDAtype
+
+	lda InfoPath
+	ldx #$5000	;ID template = $50xx
+	jsr LoadFile
+	lda MainHandle+2
+	pha
+	lda MainHandle
+	pha
+	_InstallCDA
+	tax
+	cmp #$0501
+	beq too_many
+	cmp #$0f05
+	beq too_many	;ROM 01 returns $F05, not $501?
+	cmp #$0000
+	bne FatalErr0
+	jsr InitOneCDA
+	rts
+
+FatalErr0	brl FatalErr
+
+too_many	rts
+*********************************************************
+InitOneCDA	lda #0
+	sep #$20
+	pha
+	rep #$20
+	pea CalledCDA-1
+
+	lda MainHandle+2
+	ldx MainHandle
+	sta Handle+2
+	stx Handle
+	ldy #2
+	lda [Handle],y
+	sta Ptr+2
+	lda [Handle]
+	sta Ptr
+
+	lda [Ptr]
+	and #$00ff
+	clc
+	adc #7
+	tay
+	lda [Ptr],y
+	sep #$20
+	pha
+	rep #$20
+	dey
+	dey
+	lda [Ptr],y
+	dec a
+	pha
+	lda #0
+	rtl
+
+CalledCDA	rep #$30
+	rts
+*********************************************************
+BadSTR	brl FatalPerr
+BadSTRtype	ldx #BadCDAmsg
+	brl die
+
+LoadOneSTR	sta InfoPath
+	jsr GetInfo
+	and #$00ff
+	bne BadSTR
+	lda InfoType
+	and #$00ff
+	cmp #tPIF
+	beq GoodSTRtype
+	cmp #tTIF
+	bne BadSTRtype
+
+GoodSTRtype	lda InfoPath
+	ldx #$A000	;ID template = $A0xx
+	jsr LoadFile
+	jsr ExecuteSTR
+	lda InfoType
+	and #$00ff
+	cmp #tTIF
+	bne notTemp
+** Dispose of all the TIF's memory
+	lda MyID
+	pha
+	_DisposeAll
+** Delete the TIF's memory ID
+	lda MyID
+	pha
+	_DeleteID
+
+notTemp  rts
+
+ExecuteSTR	phd
+	lda MainHandle+2
+	pha
+	lda MainHandle
+	pha
+	tsc
+	tcd
+	lda [1]
+	sta xSTRjsl+1
+	ldy #2
+	lda [1],y
+	sep #$30
+	sta xSTRjsl+3
+	rep #$30
+	phb
+	lda MyID
+	pea aDirPage
+	pld
+xSTRjsl	jsl $777777	;this is filled in
+	plb
+	pla
+	pla
+	pld
+	rts
+
+*********************************************************
+FatalPerr	clc
+	xce
+	rep #$30
+	and #$00ff
+FatalErr	clc
+	xce
+	rep #$30
+	pha
+	sec
+	xce
+	jsr mli
+	dc.b mli_close
+	dc.w CloseParms
+	clc
+	xce
+	rep #$30
+	pla
+	ldx #FatalMsg
+	brl die
+
+*********************************************************
+err1	jmp FatalPErr
+*
+* LoadFile -- take addr of pathname, return handle
+*	to seg 1 of loaded file in MainHandle
+*
+*	Input:  A = addr of pathname
+*	X = ID template
+*
+*	Output: Handle = handle loaded file image
+*
+LoadFile	sta OpenPath
+* copy path to $280 in case CDA/PIF/TIF wants it there under P8
+	ldy #62
+	lda OpenPath
+	sta <PathP
+cp280	lda (<PathP),y
+	sta $280,y
+	dey
+	dey
+	bpl cp280
+
+	pea 0
+	phx
+	_GetNewID
+	pla
+	sta MyID
+
+	ldx #$1fe
+zeroTbl	stz SegBaseTbl,x
+	stz SegBaseTbl2,x
+	stz SegEndTbl,x
+	dex
+	dex
+	bpl zeroTbl
+
+	jsr ShowName
+
+	sec
+	xce
+	jsr mli
+	dc.b mli_open
+	dc.w OpenParms
+	bcs err1
+	lda OpenRef
+	sta CloseRef
+	sta ReadRef
+	sta MarkRef
+	sta SM0Ref
+	clc
+	xce
+	rep #$30
+	jsr LoadStuff
+	sec
+	xce
+	jsr mli
+	dc.b mli_close
+	dc.w CloseParms
+	clc
+	xce
+	rep #$30
+	rts
+*********************************************************
+LoadStuff	jsr ScanAllSegs
+	jsr SetMark0
+	stz ThisSegMark
+	stz ThisSegMark+2
+FileLp	jsr Read1Seg
+	bcs FileDone
+	jsr PointNextSeg
+	bcc FileLp
+FileDone	rts
+*********************************************************
+PointNextSeg	lda SegVersion
+	and #$00ff
+	cmp #1
+	beq pns1
+	cmp #2
+	beq pns2
+	brk 2
+*
+* OMF 1.0:  segments are block-aligned
+*
+pns1	lda ByteCnt	;block count for 1.0
+	stz NxtOffset+2
+	ldy #9
+shft9	asl a
+	rol NxtOffset+2
+	dey
+	bne shft9
+	clc
+	adc ThisSegMark
+	tax
+	lda NxtOffset+2
+	adc ThisSegMark+2
+	bra SetNewMark
+
+pns2	clc
+	lda ThisSegMark
+	adc ByteCnt	;byte count for 2.0
+	tax
+	lda ThisSegMark+2
+	adc ByteCnt+2
+
+SetNewMark	sta MarkVal+2
+	stx MarkVal
+	sta ThisSegMark+2
+	stx ThisSegMark
+	sec
+	xce
+	jsr mli
+	dc.b mli_setmark
+	dc.w MarkParms
+	bcs pns_fail
+	clc
+	xce
+	rep #$30
+	clc
+	rts
+
+pns_fail	clc
+	xce
+	rep #$30
+	sec
+	rts
+
+*********************************************************
+ScanAllSegs	stz ThisSegMark+2
+	stz ThisSegMark
+ScanNxtSeg	jsr ReadHeader
+	bcs sas_dun
+	jsr AllocMem
+*
+* If SegNum=1, copy Handle to MainHandle
+*
+	lda SegNum
+	cmp #$0001
+	bne notMain
+	lda Handle+2
+	ldx Handle
+	sta MainHandle+2
+	stx MainHandle
+notMain
+*
+* record segment base in table
+*
+	lda SegNum
+	asl a
+	tay
+	lda Ptr+2
+	sta SegBaseTbl2,y
+	lda Ptr
+	sta SegBaseTbl,y
+* record segment end in table
+	clc
+	lda Ptr
+	adc SegLength
+	sta SegEndTbl,y
+*
+	jsr PointNextSeg
+	bcc ScanNxtSeg
+sas_dun	rts
+*********************************************************
+SetMark0	lda #0
+	tax
+SetMarkAX	;entry
+	sta mVal+2
+	stx mVal
+	sec
+	xce
+	jsr mli
+	dc.b mli_setmark
+	dc.w SM0Parms
+	clc
+	xce
+	rep #$30
+	rts
+SM0Parms	dc.b 2
+SM0Ref	dc.b 0
+mVal	dc.l 0
+
+*********************************************************
+Read1Seg	jsr ReadHeader
+	bcs r1s_dun
+
+	jsr GetPtr
+SegLp	jsr Read1Rec
+	bcc SegLp
+	clc
+r1s_dun	rts
+
+*********************************************************
+AllocMem	lda #0
+	pha
+	pha
+	lda SegLength+2
+	pha
+	lda SegLength
+	pha
+	lda MyID
+	pha
+	pea $C018 ;flags: locked, no bank cross, no special memory
+	lda #0
+	pha
+	pha
+	_NewHandle
+	bcc gotmem
+	brl FatalErr
+gotmem	pla
+	sta Handle
+	pla
+	sta Handle+2
+	lda [Handle]
+	sta Ptr
+	ldy #2
+	lda [Handle],y
+	sta Ptr+2
+*
+* fill the block with zeroes!
+*
+	sep #$20
+	longa off
+	lda #0
+	ldx SegLength
+	ldy #0
+fillzer	sta [Ptr],y
+	iny
+	dex
+	bne fillzer
+	rep #$20
+	longa on
+	rts
+*
+* Already allocated -- get address in Ptr
+*
+GetPtr	lda SegNum
+	asl a
+	tay
+	lda SegEndTbl,y
+	sta SegEnd
+	lda SegBaseTbl2,y
+	sta Ptr+2
+	sta SegBase+2
+	lda SegBaseTbl,y
+	sta Ptr
+	sta SegBase
+	ora SegBase+2
+	bne sbOK
+	lda SegNum
+	ldx #msgNilBase
+	brl die
+sbOK	rts
+
+*********************************************************
+*
+* Allocate $0800..C000 in banks E0 and E1 if it's not
+* already allocated.
+*
+*********************************************************
+AllocP8Mem	pea 0
+	pea $3000
+	_GetNewID
+	plx
+* allocate $0800..C000 in bank 0
+	phx
+	lda #0
+	pha	;return space hi
+	pha	;return space lo
+	pha	;length hi=0
+	pea $C000-$0800	;
+	phx	;ID
+	pea $C013	;flags (fixed address)
+	pea $0000
+	pea $0800
+	_NewHandle
+	pla
+	pla	;ignore result
+* allocate $0800..C000 in bank 1
+	plx	;retrieve ID
+	lda #0
+	pha
+	pha
+	pha	;length hi=0
+	pea $C000-$0800	;
+	phx	;ID
+	pea $C013	;flags (fixed address)
+	pea $0001
+	pea $0800
+	_NewHandle
+	pla
+	pla	;ignore result
+	rts
+
+*********************************************************
+*
+* Read one record from the load file.  The kinds of
+* records we can deal with are:
+*
+*  $00	END
+*  $e2	RELOC
+*  $e3	INTERSEG
+*  $f1	DS
+*  $f2	LCONST
+*  $f5	cRELOC
+*  $f6	cINTERSEG
+*  $f7	SUPER
+*
+*********************************************************
+rec_END	equ $00
+rec_RELOC	equ $e2
+rec_INTERSEG	equ $e3
+rec_DS	equ $f1
+rec_LCONST	equ $f2
+rec_cRELOC	equ $f5
+rec_cINTERSEG	equ $f6
+rec_SUPER	equ $f7
+
+Read1Rec	lda #1
+	ldx #BigBuff
+	jsr Read_a
+	lda BigBuff
+	and #$00ff
+	beq doEND
+	cmp #rec_LCONST
+	beq doLCONST
+	cmp #rec_cRELOC
+	beq doCRELOC0
+	cmp #rec_RELOC
+	beq doRELOC0
+	cmp #rec_DS
+	beq doDS0
+	cmp #rec_INTERSEG
+	beq doINT0
+	cmp #rec_cINTERSEG
+	beq doCINT0
+	cmp #rec_SUPER
+	beq doSUPER0
+	ldx #BadRecMsg
+	brl die
+
+doEND	sec
+	rts
+
+doDS0	brl doDS
+doCRELOC0	brl doCRELOC
+doRELOC0	brl doRELOC
+doSUPER0	brl doSUPER
+doINT0	brl doINTERSEG
+doCINT0	brl doCINTERSEG
+
+*********************************************************
+*
+* doLCONST -- read an LCONST record in 1 or more passes;
+*             reads a BigBuff at a time and BlockMoves
+*             it to [Ptr], incrementing Ptr past the end
+*             of the data loaded
+*
+*********************************************************
+doLCONST	lda #4	;read the 4-byte length from the
+	ldx #ByteCount	;beginning of the record
+	jsr Read_a
+
+MoreLCONST	lda ByteCount
+	ldx #BigBuff
+	jsr Read_a
+
+	pea 0
+	pea BigBuff
+	pei Ptr+2
+	pei Ptr
+	pea 0
+	lda ReadXfer	;was ByteCount
+	pha
+	_BlockMove
+* ptr += number of bytes actually read
+	clc
+	lda Ptr
+	adc ReadXfer	;was ByteCount
+	sta Ptr
+	lda Ptr+2
+	adc #0	;was ByteCount+2
+	sta Ptr+2
+* subtract number of bytes actually read/transferred from ByteCount
+	sec
+	lda ByteCount
+	sbc ReadXfer
+	sta ByteCount
+	lda ByteCount+2
+	sbc #0
+	sta ByteCount+2
+* go back for more if we haven't read it all
+	lda ByteCount
+	ora ByteCount+2
+	bne MoreLCONST
+
+	clc
+	rts
+
+*********************************************************
+doDS	lda #4
+	ldx #ByteCount
+	jsr Read_a
+	sep #$20
+	longa off
+	lda #0
+	longa on
+	ldx ByteCount
+	ldy #0
+DS1	sta [Ptr],y
+	iny
+	dex
+	bne DS1
+	rep #$20
+	clc
+	lda Ptr
+	adc ByteCount
+	sta Ptr
+	lda Ptr+2
+	adc ByteCount+2
+	sta Ptr+2
+	clc
+	rts
+
+*********************************************************
+doCRELOC	ldx #RelInfo
+	lda #6
+	jsr Read_a
+	lda RelWhere+2
+	sta RelAdj
+	stz RelWhere+2
+	stz RelAdj+2
+	bra calcRELOC
+
+doRELOC	ldx #RelInfo
+	lda #10
+	jsr Read_a
+calcRELOC	clc
+	lda RelAdj
+	adc SegBase
+	sta RelAdj
+	lda RelAdj+2
+	adc SegBase+2
+	sta RelAdj+2
+	jsr ShiftIt
+	clc
+	lda RelWhere
+	adc SegBase
+	tax
+	lda RelWhere+2
+	adc SegBase+2
+store_some	pha
+	phx
+	phd
+	tsc
+	tcd
+	longa off
+	sep #$30
+	lda RelNum
+	cmp #2
+	beq Store2
+	cmp #3
+	beq Store3
+	cmp #4
+	beq Store4
+	cmp #1
+	beq Store1
+	longa on
+	brk 3	;bad RELOC number
+
+Store2	rep #$30
+	lda RelAdj
+	sta [3]
+	pld
+	pla
+	pla
+	clc
+	rts
+
+Store3
+	longi off
+	ldy #2
+	longi on
+	lda RelAdj+2
+	sta [3],y
+	rep #$30
+	lda RelAdj
+	sta [3]
+	pld
+	pla
+	pla
+	clc
+	rts
+
+Store4	rep #$30
+	ldy #2
+	lda RelAdj+2
+	sta [3],y
+	lda RelAdj
+	sta [3]
+	pld
+	pla
+	pla
+	clc
+	rts
+
+Store1	lda RelAdj
+	sta [3]
+	rep #$30
+	pld
+	pla
+	pla
+	clc
+	rts
+
+RelInfo
+RelNum	dc.b 0
+RelShft	dc.b 0
+RelWhere	dc.l 0
+RelAdj	dc.l 0
+
+*********************************************************
+ShiftIt	sep #$20
+	lda RelShft
+	rep #$20
+	beq shftdun
+	bpl ShftLeft
+	ora #$ff00
+	tax
+sr1	lsr RelAdj+2
+	ror RelAdj
+	inx
+	bne sr1
+shftdun	rts
+
+ShftLeft	and #$00ff
+	tax
+sl1	asl RelAdj
+	rol RelAdj+2
+	dex
+	bne sl1
+	rts
+
+*********************************************************
+doCINTERSEG	lda #7
+	ldx #iSegInfo
+	jsr Read_a
+	lda iSegInfo+5
+	sta iSegInfo+10
+	stz iSegInfo+12
+	lda iSegInfo+4
+	and #$00ff
+	sta iSegInfo+8
+	stz iSegInfo+4
+	bra calcISEG
+
+doINTERSEG	lda #14
+	ldx #iSegInfo
+	jsr Read_a
+	lda iFile
+	cmp #1
+	beq calcISEG
+	ldx #msgFileNum
+	brl die
+
+done1	clc
+	rts
+
+calcISEG	lda iNum	;stores shift count, too
+	sta relNum
+	lda iSeg
+	asl a
+	tay
+	clc
+	lda iAdj
+	adc SegBaseTbl,y
+	sta relAdj
+	lda iAdj+2
+	adc SegBaseTbl2,y
+	sta relAdj+2
+	jsr ShiftIt
+	lda relAdj+2
+	ldx relAdj
+	sta iAdj+2
+	stx iAdj
+	clc
+	lda iWhere
+	adc SegBase
+	tax
+	lda iWhere+2
+	adc SegBase+2
+	brl store_some
+
+iSegInfo
+iNum	dc.b 0
+iShft	dc.b 0
+iWhere	dc.l 0
+iFile	dc.w 0
+iSeg	dc.w 0
+iAdj	dc.l 0
+
+*********************************************************
+doSUPER	lda SegBase+2
+	ldx SegBase
+	sta Ptr+2
+	stx Ptr
+	ldx #supBytes
+	lda #5
+	jsr Read_a	;get 4 bytes to supBytes, 1 to supType
+	dec supBytes  ;the Type counts as 1!
+Super1	lda supBytes
+	ora supBytes+2
+	beq SuperDun
+	jsr DoSupRec
+	inc Ptr+1	;next page
+	bra Super1
+SuperDun	clc
+	rts
+
+badSupKind	brk 4
+
+DoSupRec	jsr Read1
+	bit #$0080
+	beq notSkip
+* skip some pages (in addition to skipping to the next one)
+	and #$007f
+	clc
+	adc Ptr+1
+	sta Ptr+1
+	dec Ptr+1 ;will be INCed shortly
+	rts
+
+notSkip	inc a
+	sta subcount
+nextoffset	jsr Read1
+	jsr DispatchSub
+	dec subcount
+	bne nextoffset
+	clc
+	rts
+*
+* Process one offset within the current page
+*    A = offset
+*    Ptr = beginning of page we're on
+*
+done3	rts
+DispatchSub	ldx supType
+	beq SupR2
+	cpx #1
+	beq SupR3
+	cpx #2
+	beq SupI1
+	cpx #14
+	bcc badSupKind
+	cpx #26
+	bcc SupI13_24
+	cpx #38
+	bcs badSupKind  ;fall into SupI25_36
+*
+* Handle Super INTERSEG 25 thru 36:
+*
+* Add SegBaseTbl2[X-25] to [Ptr],A (2 bytes)
+*
+SupI25_36	tay
+	txa
+	sec
+	sbc #25
+	asl a
+	tax
+	clc
+	lda [Ptr],y
+	adc SegBaseTbl,x
+	bcs supOuch1
+	lda #0
+	adc SegBaseTbl2,x
+	sta [Ptr],y
+	rts
+supOuch1	brk 5
+*
+* Handle Super INTERSEG 13 thru 24 (codes 14-25):
+*
+* Add SegBaseTbl[X-13] to [Ptr],A (2 bytes)
+*
+SupI13_24	tay
+	txa
+	sec
+	sbc #13
+	asl a
+	tax
+	clc
+	lda SegBaseTbl,x
+	adc [Ptr],y
+	bcs sup_ouch2
+	cmp SegEndTbl,x
+	bcs sup_ouch2
+	sta [Ptr],y
+	rts
+sup_ouch2	brk 6
+
+SupR2	tay
+	lda [Ptr],y
+	clc
+	adc SegBase
+	bcs sup_ouch3
+	cmp SegEnd
+	bcs sup_ouch3
+	sta [Ptr],y
+	rts
+sup_ouch3	brk 7
+
+SupR3	tay
+	lda [Ptr],y
+	clc
+	adc SegBase
+	bcs sup_ouch4
+	cmp SegEnd
+	bcs sup_ouch4
+	sta [Ptr],y
+	iny
+	iny
+	lda [Ptr],y
+	and #$00ff
+	bne sup_ouch4
+	adc SegBase+2
+	sep #$20
+	sta [Ptr],y
+	rep #$20
+	rts
+sup_ouch4	brk 8
+*
+* Look at [Ptr],y	for a 2-byte offset,
+*	[Ptr],y+2 for a 1-byte segment number
+*
+* Add the offset to SegBase[segnum] and
+* store at [Ptr] (3 bytes)
+*
+SupI1	tay
+	iny
+	iny
+	lda [Ptr],y
+	dey
+	dey
+	and #$00ff
+	asl a
+	tax	;x = index into SegBaseTbl
+	lda SegBaseTbl+2,x
+	ora SegBaseTbl,x
+	beq SupI1_nil
+	clc
+	lda [Ptr],y
+	adc SegBaseTbl,x
+	bcs supI1_ouch
+	cmp SegEndTbl,x
+	bcs supI1_ouch
+	sta [Ptr],y
+	lda SegBaseTbl2,x
+	iny
+	iny
+	sep #$20
+	sta [Ptr],y
+	rep #$20
+	rts
+
+supI1_nil	brk 9
+supI1_ouch	brk 10
+*********************************************************
+Read1	dec supBytes
+	lda #1
+	ldx #ReadHere
+	jsr Read_a
+	dc.b $a9	;LDA #
+ReadHere	dc.w 0
+	rts
+
+*********************************************************
+Read_a	jsr Read_a0
+	bcs ouchRead
+	rts
+
+ouchRead	brl FatalPerr
+
+*********************************************************
+Read_a0	cmp #BigBuffSize
+	bcc nClipLen
+	lda #BigBuffSize
+nClipLen	sta ReadLen
+	stx ReadWhere
+	sec
+	xce
+	jsr mli
+	dc.b mli_read
+	dc.w ReadParms
+	bcs read_err
+	clc
+	xce
+	rep #$30
+	clc
+	rts
+
+read_err	clc
+	xce
+	rep #$30
+	sec
+	rts
+*********************************************************
+CheckSegKind	php
+	rep #$30
+	lda SegVersion
+	and #$00ff
+	cmp #1
+	beq csk1
+	cmp #2
+	beq csk2
+	brk 11
+
+csk1	lda SegKind
+	bit #$0080
+	bmi cskBad1
+	and #$001f
+	cmp #$0002
+	beq cskBad1
+	cmp #$0004
+	beq cskBad1
+	cmp #$0008
+	beq cskBad1
+	cmp #$0010
+	beq cskBad1
+	cmp #$0011
+	beq cskBad1
+	cmp #$0012
+	beq cskBad1
+	bra cskGood
+
+csk2	lda SegKind2
+	bmi cskBad2 ;dynamic
+	bit #$0800
+	bne cskBad2
+	and #$001f
+	cmp #$0002
+	beq cskBad2
+	cmp #$0004
+	beq cskBad2
+	cmp #$0008
+	beq cskBad2
+	cmp #$0010
+	beq cskBad2
+	cmp #$0012
+	beq cskBad2
+cskGood	plp
+	clc
+	rts
+cskBad1	lda SegKind
+	and #$00ff
+	plp
+	sec
+	rts
+cskBad2	plp
+	sec
+	lda SegKind2
+	rts
+
+*********************************************************
+ReadHeader	lda #$2c
+	ldx #HeaderImage
+	jsr Read_a0
+	bcc GotHdr
+
+partialHdr	sec	;v1.3
+	rts
+
+GotHdr	lda ReadXfer	;v1.3
+	cmp #$2c	;v1.3
+	bne partialHdr	;v1.3
+
+	clc
+	lda DispData
+	adc ThisSegMark
+	sta MarkVal
+	lda ThisSegMark+2
+	adc #0
+	sta MarkVal+2
+	sec
+	xce
+	jsr mli
+	dc.b mli_setmark
+	dc.w MarkParms
+	clc
+	xce
+	rep #$30
+*
+* check for valid fields
+*
+	lda SegVersion
+	and #$00ff
+	cmp #3
+	bcs BadVersion
+	lda SegNumlen
+	and #$00ff
+	cmp #4
+	bne BadNumLen
+	jsr CheckSegKind
+	bcs BadKind
+	sep #$20
+	lda SegNumsex
+	rep #$20
+	bne BadNumsex
+	lda SegOrg
+	bne BadOrg
+	lda SegOrg+2
+	bne BadOrg
+	clc
+	rts
+
+*********************************************************
+die	pha
+	pea 0
+	phx
+*
+* If we were run with a pathname in our startup buffer,
+* don't cause a SystemDeath--just complain & get a key
+*
+	lda LoadPath
+	bne dieNicely
+
+	_SysFailMgr
+	brk 12
+
+dieNicely	pla
+	sta Ptr
+	pla	;high byte of message addr--not needed
+	sec
+	xce
+	longa off
+	longi off
+	jsr home
+	lda (Ptr)
+	tax
+	beq NiceMsgX
+	ldy #1
+dieNiceMsg	lda (Ptr),y
+	ora #$80
+	jsr cout
+	iny
+	dex
+	bne dieNiceMsg
+NiceMsgX	lda 2,s
+	jsr prbyte
+	pla
+	plx
+	jsr prbyte
+	jsr crout
+	jsr crout
+	jsr rdkey
+	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	brl doQuit
+
+*********************************************************
+BadKind	ldx #msgKind
+	bra die
+BadVersion	rep #$20
+	lda SegVersion
+	and #$00ff
+	ldx #msgVer
+	bra die
+BadNumsex	brk 15
+BadNumLen	rep #$20
+	lda SegNumlen
+	and #$00ff
+	ldx #msgNuml
+	bra die
+BadOrg	lda #0
+	ldx #msgOrg
+	bra die
+
+msgNilBase	str 'P8CDA: NIL segment base '
+msgFileNum	str 'P8CDA: INTERSEG filenum<>1: '
+FatalMsg	str 'P8CDA: Fatal error='
+BadRecMsg	str 'P8CDA: Bad record type='
+msgNuml	str 'P8CDA: Bad NumLen='
+msgOrg	str 'P8CDA: Bad ORG '
+msgKind	str 'P8CDA: Bad segment kind='
+msgVer	str 'P8CDA: Bad OMF version='
+BadCDAmsg	str 'P8CDA: Filetype not CDA/TIF/PIF: '
+msgP16	dc.b 47,'P8CDA: A CDA/TIF/PIF tried to call',cr
+	dc.b 'ProDOS 16.  '
+*********************************************************
+ShowTitle	sec
+	xce
+	longa off
+	longi off
+	lda AppleKey
+	bpl st_x
+	jsr home
+	ldy #0
+st1	lda TheTitle,y
+	beq st2
+	ora #$80
+	jsr cout
+	iny
+	bne st1
+	inc st1+2
+	bra st1
+st2	jsr rdkey
+	jsr home
+st_x	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	rts
+
+*********************************************************
+ShowName	lda OpenPath
+	sta NamePtr
+	sec
+	xce
+	longa off
+	longi off
+	lda AppleKey
+	bpl sn_x
+	ldy #1
+	lda (NamePtr)
+	tax
+sn1	lda (NamePtr),y
+	ora #$80
+	jsr cout
+	iny
+	dex
+	bne sn1
+	lda #$ae
+	jsr cout
+	jsr cout
+	jsr cout
+	jsr crout
+sn_x	clc
+	xce
+	rep #$30
+	longa on
+	longi on
+	rts
+
+*********************************************************
+CatchP16	lda JumpBad16
+	sta >P16
+	sta >P16_2
+	lda JumpBad16+2
+	sta >P16+2
+	sta >P16_2+2
+	rts
+JumpBad16	jmp >Bad16
+
+Bad16	clc
+	xce
+	rep #$30
+	ldx #msgP16
+	lda #0
+	brl die
+*********************************************************
+AppleKey	dc.w 0
+OptionKey	dc.w 0
+*********************************************************
+HeaderImage
+ByteCnt	dc.l 0	;block count for OMF 1.0, bytecnt for 2.0
+	dc.l 0
+SegLength	dc.l 0	;length of this segment
+SegKind	dc.b 0	;SegKind for OMF v1 only
+SegLablen	dc.b 0
+SegNumlen	dc.b 0
+SegVersion	dc.b 0
+	dc.l 0	;banksize
+SegKind2	dc.w 0	;SegKind for OMF v2 only
+	dc.w 0	;undefined
+SegOrg	dc.l 0
+SegAlign	dc.l 0
+SegNumsex	dc.b 0
+	dc.b 0
+SegNum	dc.w 0
+SegEntry	dc.l 0
+DispName	dc.w 0
+DispData	dc.w 0
+*********************************************************
+InfoParms	dc.b 10
+InfoPath	dc.w 0
+	dc.b 0
+InfoType	dc.b 0
+	dc.w 0
+	dc.b 0
+	dc.w 0,0,0,0,0
+*********************************************************
+OpenParms	dc.b 3
+OpenPath	dc.w 0
+OpenBuff	dc.w FileBuff2
+OpenRef	dc.b 0
+*********************************************************
+ReadParms	dc.b 4
+ReadRef	dc.b 0
+ReadWhere	dc.w 0
+ReadLen	dc.w 0
+ReadXfer	dc.w 0	;how much was actually read?
+*********************************************************
+CloseParms	dc.b 1
+CloseRef	dc.b 0
+*********************************************************
+MarkParms	dc.b 2
+MarkRef	dc.b 0
+MarkVal	dc.l 0	;really 3, but we store use 4
+*********************************************************
+MyID	dc.w 0
+ThisSegMark	dc.l 0
+ByteCount	dc.l 0
+MainHandle	dc.l 0
+NxtOffset	dc.l 0
+*********************************************************
+SegBase	dc.l 0
+SegEnd	dc.l 0
+*********************************************************
+supBytes	dc.l 0
+supType	dc.w 0	;must immed follow supBytes
+subcount	dc.w 0
+*********************************************************
+SysDApath	dc.b 16,'SYSTEM/DESK.ACCS'
+	ds.b 20
+Sys8DApath	dc.b 14,'SYSTEM/P8.ACCS'
+	ds.b 20
+SysSETUPpath	dc.b 15,'SYSTEM/P8.SETUP'
+	ds.b 20
+
+PfxParms	dc.b 1
+PfxAdr	dc.w 0
+
+dOpenParms	dc.b 3
+doName	ds.b 2
+	dc.w FileBuff
+doRef	ds.b 1
+
+dReadParms	dc.b 4
+drRef	ds.b 1
+	dc.w deEntry	;where
+drLen	dc.w 0
+	dc.w 0
+
+dCloseParms	dc.b 1
+dcRef	ds.b 1
+
+dMarkParms	dc.b 2
+dmRef	ds.b 1
+dmMark	dc.b 0,0,0
+
+EntryLen	ds.b 1
+EntPerBlk	ds.b 1
+EntThisBlk	ds.b 1
+DirEndFlag	ds.b 2	;low byte is flag
+*********************************************************
+
+	EndP
+
+	END

@@ -1,0 +1,374 @@
+
+============================         DAL Systems
+Documentation for P8CDA v1.2
+
+by David A. Lyons   7-Mar-88
+============================
+
+
+-------
+Purpose
+-------
+P8CDA lets IIgs users load Classic Desk Accessories (CDAs) without
+booting ProDOS 16.  CDAs appear when Apple-Ctrl-ESC is typed; the
+Control Panel is a CDA that is built into the Apple IIgs ROM.
+
+P8CDA can be installed on any ProDOS volume, including 5.25" drives,
+3.5" drives, hard drives, and RAM drives.
+
+
+----------------
+Shareware notice
+----------------
+P8CDA is Shareware for the Apple IIgs.  You are encouraged to
+give copies of it to users groups, friends, bulletin boards,
+and whatever else you can think of.  Try it out for ten days.
+If it's useful to you, send in the $10 registration fee.
+(You may send $15 instead of $10 and receive a 3.5" disk with
+the latest version of P8CDA, plus some public domain utilities
+from DAL Systems.)
+
+Registered users will be notified of any updates to P8CDA and
+are eligible for technical support.
+
+Your honesty will allow me to continue distributing low-cost
+utilities for the Apple II.
+
+Please send your comments on P8CDA to DAL Systems on GEnie or
+CompuServe or by mail (addresses are at the top of this file).
+
+----------------
+Revision History
+----------------
+v1.2:
+  P8CDA v1.1 was unable to run the next SYS application correctly
+  when the volume it was run from had a 15-character name.  A
+  fatal error message ("P8CDA: Fatal error=0046" -- file not
+  found) was the result.
+
+  v1.2 enables interrupts (by executing a CLI instruction);
+  booting from the Disk Port (port 6) could leave interrupts
+  disabled.
+
+v1.1:
+  P8CDA v1.1 makes a patch to ProDOS 1.4 (in RAM, not on disk)
+  to prevent "MLI Error $FF" messages or other strange behavior
+  in CDAs which check ProDOS's "busy" flag before making ProDOS
+  calls.  See the "ProDOS busy-flag bug" section below for more
+  details.
+
+  Also, ProDOS 16 calls are now trapped nicely.  Instead of
+  getting dropped in the monitor when a CDA tries to call ProDOS
+  16, you get the message "P8CDA: A CDA tried to call ProDOS 16".
+
+  Finally, a bug was fixed which sometimes caused Fatal errors
+  ($0040, bad pathname) when CDA files had been _deleted_.
+  v1.0 was trying to load them anyway!)
+
+
+--------------------
+Typical Installation
+--------------------
+Most users will want to insert P8CDA as an invisible part of the
+boot sequence on a ProDOS 8 disk.  Any kind of ProDOS disk will
+work (3.5", 5.25", Hard drive, RAM disk, ROM disk, or whatever
+you have).
+
+  -- Copy the P8 file from the SYSTEM directory of a ProDOS 16
+     disk into the main directory of your ProDOS 8 disk, and
+     call it PRODOS.  (This is *not* the same as the file called
+     PRODOS on a ProDOS 16 disk.)
+
+  -- Put P8CDA.SYSTEM in the main directory, and make sure it's the
+     first .SYSTEM file.  Create a SYSTEM directory, and create a
+     DESK.ACCS directory inside the SYSTEM directory.
+
+  -- Put all the CDAs (filetype=$B9) you want to load inside the
+     DESK.ACCS directory.  IF YOU HAVE TROUBLE, START WITH JUST
+     A COUPLE CDAs AND ADD THEM ONE AT A TIME, REBOOTING EACH TIME
+     TO SEE WHICH CDAs ARE CAUSING THE PROBLEM.  Then refer to
+     "What should I do if my CDAs don't work?" below.
+
+  -- Put the .SYSTEM file you want to boot into *after* P8CDA.SYSTEM
+     in your main directory.
+
+  -- Reboot, and you can use Apple-Ctrl-ESC to get to the Desk
+     Accessories menu!  [Hold down the Apple key during boot to
+     get a title screen for P8CDA.]
+
+Once P8CDA loads your CDAs, it scans the main directory for the
+first .SYSTEM file *after* P8CDA.SYSTEM and runs it.  (If you
+change the name to something other than P8CDA.SYSTEM, it won't
+be able to find itself.)
+
+If P8CDA can't find another .SYSTEM file to run, it just does a
+ProDOS "QUIT" call.  If you have a fancied-up QUIT patched into
+your ProDOS, this may actually be useful.
+
+
+------------------
+Installation notes
+------------------
+If you already have other .SYSTEM files in your directory and do
+not wish to change their names, there are a couple of things you
+could do:
+
+  (1) If you have a utility that lets you rearrange entries in
+      your directory, use it to put P8CDA.SYSTEM first.
+
+  (2) Otherwise, use any program that can COPY files to make
+      a second copy of the first .SYSTEM file in your directory,
+      and give the copy a different name.  Then DELETE the first
+      copy, copy P8CDA.SYSTEM onto the disk [it takes the place
+      of the file you just deleted], and RENAME the copied file
+      back to its original name.
+
+Of course, if you have another program that behaves like P8CDA
+and runs the *next* .SYSTEM file, P8CDA.SYSTEM does not need
+to be first!  But it still has to come before any program that
+doesn't run the next .SYSTEM file.
+
+The SYSTEM and SYSTEM/DESK.ACCS directories are already present
+on a ProDOS 16 disk; P8CDA uses the same names to (1) avoid
+confusion, and (2) let you make a copy of your favorite ProDOS 16
+disk and just delete all the stuff you don't need; the CDAs will
+be in the right place already.
+
+
+----------------------
+Alternate installation
+----------------------
+If you have a utility like SETUP.SYSTEM (see November, 1987
+Call-A.P.P.L.E., pp. 14-23), you can put P8CDA.SYSTEM in your
+SETUPS directory, and put all the CDAs in there, too.  When
+P8CDA sees that the Prefix is not set to the main directory,
+it will look where the Prefix is set (instead of in SYSTEM/
+DESK.ACCS).
+
+You can also put both SETUP.SYSTEM and P8CDA.SYSTEM in the
+main directory (and put the CDAs in SYSTEM/DESK.ACCS).  If
+you do this, you will have to put P8CDA.SYSTEM *after*
+SETUP.SYSTEM.  This is because SETUP.SYSTEM is a bit lazy;
+it runs the _second_ .SYSTEM file in your directory.  This
+scheme will fail if SETUP.SYSTEM _is_ the second one!
+
+If you put SETUP.SYSTEM first, it will do its thing and then
+run P8CDA.SYSTEM.  P8CDA will do its thing and run the .SYSTEM
+file *after* itself.
+
+
+-----
+Notes
+-----
+If you hold down the Apple key while P8CDA is running, you will
+see a title screen with a Shareware notice.  Near the bottom of
+the screen will be a _version number_ and a "Press a key" prompt.
+When you press a key, P8CDA continues and displays the name of
+each CDA as it is loaded.
+
+If you are getting any error messages when loading your CDAs,
+this will let you find out which CDA was being loaded when the
+problem occured.
+
+Error $0201 means all the available RAM is in use.  Solutions,
+in order of preference:
+
+  -- Decrease the size of your RAM disk (/RAM5) if you are
+     using it.
+  -- Get a bigger RAM card.
+  -- Don't load so many CDAs.
+  -- Hold down the Option key while P8CDA is loading.  This
+     allows the CDAs to use the last 16K of the super-hires
+     display.  [This feature is intended for IIgs owners with
+     only 256K.  If you have a RAM expansion card, decreasing
+     your RAM disk size is a much better idea.]
+
+     * If you will be running any programs that use Super-hires,
+       do NOT hold down Option while P8CDA is loading!
+
+     * Do NOT use the Option feature if you have patched AppleWorks
+       to reset the shadow register on exit, unless your patch
+       preserves the status of the "shadow super-hires" bit.
+
+
+--------------------------------
+Using P8CDA from a command shell
+--------------------------------
+If you have a command shell like Davex or ECP-8, you can run
+P8CDA from it.  If you pass a pathname to P8CDA, it will try
+to load the specified CDA.
+
+If you don't pass a pathname, it will try to load all the CDAs
+in the directory your prefix is set to.  Once P8CDA does its
+thing, it returns you to your command shell (by doing a ProDOS
+"QUIT" call).
+
+
+---------------------------
+Does it work with ALL CDAs?
+---------------------------
+No.  The major source of trouble is CDAs which call ProDOS 16
+when they are initialized without first checking that it is
+available.  If this happens, you will be get an appropriate
+error message from P8CDA.
+
+CDAs containing dynamic segments or initialization segments
+will not work with P8CDA.
+
+
+---------------------------------------
+What should I do if my CDAs don't work?
+---------------------------------------
+If you find a CDA that tries to call ProDOS 16, contact the CDA's
+author and explain that the CDA should check that the value at
+E1/00BC (1 byte) is $01 before making any ProDOS 16 calls. [See
+_Apple IIgs ProDOS 16 Reference_, APDA Draft of 13-Nov-86, p30.]
+
+(The assumption that ProDOS 16 is available when a CDA is loaded
+is a pretty reasonable one.  But under P8CDA, it is false.)
+
+If you find any CDAs that don't work with P8CDA (and don't display
+a reasonable error message), I want to know about it.  (If the CDA
+is public domain or Shareware, it will help if you send me a copy
+or tell me where to get one.)
+
+Nifty List v2.1 (and some earlier versions) recklessly calls
+ProDOS 16 to load its data file.  Nifty List 2.2 and up check to see
+if ProDOS 16 is available before trying to load the data file (under
+P8CDA, Nifty List 2.2+ will work, but no tool names or ProDOS names
+will be available, making it considerably less useful.)
+
+
+--------------------
+ProDOS busy-flag bug
+--------------------
+P8CDA (v1.1+) patches ProDOS in RAM (not on your disk) if the
+"MLIACTV" bug has not already been patched in your copy of
+ProDOS. The bug results in bogus "MLI Error $FF" messages from
+CDAs which check the MLIACTV flag before making ProDOS 8 calls.
+ProDOS 8 1.4 often leaves this flag set even when ProDOS is
+_not_ busy.  The patch consists of changing the byte at $DE8F
+from $0E (ASL) to $4E (LSR).  P8CDA makes this patch only if
+$DE90-1 contain $BF9B (the address of the MLIACTV flag).  [All
+of this is in the "$C08B" bank of the language card space.]
+
+(This applies to some versions of ProDOS prior to 1.4, and I
+wouldn't be surprised if it applied to some future versions,
+too.)
+
+To permanently patch this and other bugs in ProDOS on your disks,
+use the PATCHP.FP program available from DL1 in CompuServe's
+APPLEII forum (among other places).
+
+
+-----------------
+Technical details
+-----------------
+P8CDA supports the old (v1.0) and new (v2.0) Object Module Formats,
+and multiple-segment CDAs are supported.  However, only static
+code segments and static data segments are supported.  Dynamic
+segments are not supported and will not be.  Init segments are
+not supported, but could be if there is a demand for it.
+
+There are no CDAs that I know of that use dynamic segments or
+initialization segments.
+
+ROM 01's InstallCDA function returns error $0F05 rather than $0501
+when the Desk Accessories menu is full.  Weird, eh?  (This happens
+only when the ROM is used "cold," not when TOOL.SETUP has been
+loaded.)
+
+P8CDA does not report any error if the Desk Accessories menu is
+full.
+
+If $0800..BFFF in banks 0 and 1 is not allocated, P8CDA requests
+a $30xx ID (from the miscellaneous toolset) and allocates that RAM
+with NewHandle.
+
+If you hold down the Option key, P8CDA allows the CDAs to reside
+in "special memory."  In this case, $E0/2000..5FFF and
+$E1/2000..5FFF are allocated, and shadowing for the Super-hires
+display is disabled (bit $08 of the Shadow register at $C035 is
+set).  The end result:  holding down Option allows 16K of extra
+RAM ($E1/6000..9FFF) to be used for CDAs.
+
+
+---------------------
+Multiple-segment CDAs
+---------------------
+Most CDAs consist of only one segment, but P8CDA can load CDAs
+with up to 255 segments.
+
+Note that Glen Bredon's Master CDA does NOT support multiple-
+segment CDAs, and cannot reasonably be expected to.  (The Master
+Builder program would have to change the segment numbers on all
+inter-segment references in the CDAs; for SUPER records in OMF
+v2.0 CDAs, this would usually result in some segment numbers
+greater than 12, which cannot be represented in SUPER records!)
+
+Once a Master CDA is built, it *is* a multiple-segment CDA, with
+one segment for each CDA it controls [so it can't be used inside
+another Master CDA!].
+
+CDAs produced using TML Pascal have at least two segments, so
+they do not work under control of a Master CDA.  (TML Pascal v1.1
+has a $CDA directive that allows CDAs to be generated easily.)
+
+
+---------
+Addresses
+---------
+Apple Programmers and Developers Association (APDA)
+290 S.W. 43rd St.
+Renton, WA 98055
+(206) 251-6548
+
+Glen Bredon
+521 State Road
+Princeton, NJ 08540
+[CompuServe 72245,636]
+
+TML Systems
+8837-B Goodby's Executive Drive
+Jacksonville, FL 32217
+(904) 636-8592
+
+
+-------------
+Advertisement
+-------------
+Shareware currently available from DAL Systems:
+
+  -- Davex, a ProDOS 8 command shell and program launcher.
+     A description (DAVEX.TXT) is available in DL3 on
+     CompuServe's APPLEII forum.  [The program itself is also
+     available in DL3, but it is very large.]
+     Registration fee:  $25
+     (Specify 3.5" or 5.25" disk.)
+
+  -- Nifty List, an Apple IIgs debugging/browsing CDA for
+     ProDOS 16 software developers and the terminally curious.
+     Available in DL4 on CompuServe's APPLEII forum.
+     Registration fee:  $15
+
+  -- P8CDA, a SYS program for loading [most] CDAs on the IIgs
+     without booting ProDOS 16!
+     Registration fee:  $10.
+
+[IA residents add 4% sales tax.]
+
+These may be ordered directly from DAL Systems.  For sending in
+the registration fee for the products costing $15 or more, you
+will receive the latest version of the product, and you will
+receive the next update free.  [Future updates will cost $3 if
+ordered directly from DAL Systems.]  Technical support is available
+by mail and on CompuServe.
+
+For products costing $10 or less, your registration fee buys you
+the right to legally use the software and any future versions.
+You will be entitled to technical support and notified of any
+updates.
+
+--------------------------
+End of P8CDA documentation
+--------------------------

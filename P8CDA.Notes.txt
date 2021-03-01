@@ -1,0 +1,23 @@
+
+=========================
+P8CDA Notes          v2.0
+
+David A. Lyons  31-Jul-88
+=========================
+
+  o  P8CDA can now load Permanent Initialization Files (PIF, $B6)
+     and (TIF, $B7) files as well as CDAs.  To have P8CDA load
+     PIF and TIF files, put them in the SYSTEM/SYSTEM.SETUP
+     directory.  ($B6 files are also known as STR, Startup files;
+     $B7 files are also known as TSF, Temporary Startup Files.)
+
+  o  When P8CDA is run from a command shell and passed the
+     pathname of a CDA, PIF, or TIF to load, any errors that
+     occur are no longer fatal--P8CDA quits back to the command
+     shell when a key is pressed.
+
+  o  A CDA can find its pathname at $280 the first time its
+     ShutDown entry is called if P8CDA loads it.  PIF/TIF files
+     can also find the pathname there when they are executed.
+     The pathname may be complete or partial.
+----------
