@@ -1172,7 +1172,7 @@ sbOK	rts
 
 *********************************************************
 *
-* Allocate $0800..C000 in banks E0 and E1 if it's not
+* Allocate $0800..C000 in banks 00 and 01 if it's not
 * already allocated.
 *
 *********************************************************
